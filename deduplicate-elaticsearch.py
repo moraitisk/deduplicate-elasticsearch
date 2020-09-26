@@ -3,69 +3,78 @@
 # A description and analysis of this code can be found at 
 # https://alexmarquardt.com/2018/07/23/deduplicating-documents-in-elasticsearch/
 
+import sys
+import argparse
+import json
 import hashlib
 from elasticsearch import Elasticsearch, helpers
 
-ES_HOST = 'localhost:9200'
-ES_USER = 'elastic'
-ES_PASSWORD = 'elastic'
+es_host = 'localhost:9200'
 
-es = Elasticsearch([ES_HOST], http_auth=(ES_USER, ES_PASSWORD))
 dict_of_duplicate_docs = {}
 
-# The following line defines the fields that will be
-# used to determine if a document is a duplicate
-keys_to_include_in_hash = ["CAC", "FTSE", "SMI"]
+# The fields that will be used to determine if a document is a duplicate.
+keys_to_include_in_hash = []
 
+# The index name or alias in which duplicate documents will be searched.
+index_to_search = ''
 
-# Process documents returned by the current search/scroll
+# Process documents returned by the current search/scroll.
 def populate_dict_of_duplicate_docs(hit):
-
-    combined_key = ""
+    combined_key = ''
     for mykey in keys_to_include_in_hash:
         combined_key += str(hit['_source'][mykey])
 
-    _id = hit["_id"]
-
     hashval = hashlib.md5(combined_key.encode('utf-8')).digest()
 
-    # If the hashval is new, then we will create a new key
-    # in the dict_of_duplicate_docs, which will be
-    # assigned a value of an empty array.
-    # We then immediately push the _id onto the array.
-    # If hashval already exists, then
-    # we will just push the new _id onto the existing array
-    dict_of_duplicate_docs.setdefault(hashval, []).append(_id)
+    # If the hashval is new, then we will create a new key in the dict_of_duplicate_docs,
+    # which will be assigned a value of an empty array.
+    # We then immediately push a tuple of the doc _index and _id onto the array.
+    dict_of_duplicate_docs.setdefault(hashval, []).append((hit['_index'], hit['_id']))
 
-
-# Loop over all documents in the index, and populate the
-# dict_of_duplicate_docs data structure.
+# Loop over all documents in the index, and populate the dict_of_duplicate_docs.
 def scroll_over_all_docs():
-    for hit in helpers.scan(es, index='stocks'):
+    es = Elasticsearch([es_host], http_auth=None)
+    for hit in helpers.scan(es, index=index_to_search):
         populate_dict_of_duplicate_docs(hit)
 
-
 def loop_over_hashes_and_remove_duplicates():
-    # Search through the hash of doc values to see if any
-    # duplicate hashes have been found
-    for hashval, array_of_ids in dict_of_duplicate_docs.items():
-      if len(array_of_ids) > 1:
-        print("********** Duplicate docs hash=%s **********" % hashval)
-        # Get the documents that have mapped to the current hasval
-        matching_docs = es.mget(index="stocks", doc_type="doc", body={"ids": array_of_ids})
-        for doc in matching_docs['docs']:
-            # In order to remove the possibility of hash collisions,
-            # write code here to check all fields in the docs to
-            # see if they are truly identical - if so, then execute a
-            # DELETE operation on all except one.
-            # In this example, we just print the docs.
-            print("doc=%s\n" % doc)
+    # Search through the dictionary to see if any duplicate hashes have been found.
+    bulk_delete_operations = []
+    for hashval, duplicates in dict_of_duplicate_docs.items():
+        if len(duplicates) <= 1:
+            continue
 
+        # Spare the first document so that we keep just one copy of the duplicates,
+        # and iterate through the remaining to add delete operations.
+        for dup in duplicates[1:]:
+            delete_operation = {'delete': {'_index': dup[0], '_type': 'doc', '_id': dup[1]}}
+            bulk_delete_operations.append(json.dumps(delete_operation))
 
+    # Create a bulk file, containing all the delete operations, to be applied in a single request.
+    with open('bulk_deletions_file.txt', 'w') as bulk_file:
+        for op in bulk_delete_operations:
+            bulk_file.write(op + '\n')
+
+def parse_input():
+    global es_host, index_to_search, keys_to_include_in_hash
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-es', '--es_host', help='Elasticsearch host')
+    parser.add_argument('-i', '--index', help='<Required> Index name or alias to search on', required=True)
+    parser.add_argument('-k', '--keys', help='<Required> List of fields that will determine duplicate docs', nargs='+', required=True)
+
+    for opt, value in parser.parse_args()._get_kwargs():
+        if opt in ('es', 'es_host'):
+            es_host = value
+        elif opt in ('i', 'index'):
+            index_to_search = value
+        elif opt in ('k', 'keys'):
+            keys_to_include_in_hash = value
 
 def main():
+    parse_input()
     scroll_over_all_docs()
     loop_over_hashes_and_remove_duplicates()
-
 
 main()
