@@ -56,7 +56,24 @@ def loop_over_hashes_and_remove_duplicates():
         for op in bulk_delete_operations:
             bulk_file.write(op + '\n')
 
+def parse_input():
+    global es_host, index_to_search, keys_to_include_in_hash
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-es', '--es_host', help='Elasticsearch host')
+    parser.add_argument('-i', '--index', help='<Required> Index name or alias to search on', required=True)
+    parser.add_argument('-k', '--keys', help='<Required> List of fields that will determine duplicate docs', nargs='+', required=True)
+
+    for opt, value in parser.parse_args()._get_kwargs():
+        if opt in ('es', 'es_host'):
+            es_host = value
+        elif opt in ('i', 'index'):
+            index_to_search = value
+        elif opt in ('k', 'keys'):
+            keys_to_include_in_hash = value
+
 def main():
+    parse_input()
     scroll_over_all_docs()
     loop_over_hashes_and_remove_duplicates()
 
